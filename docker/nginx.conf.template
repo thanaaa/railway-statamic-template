@@ -1,0 +1,140 @@
+# docker/nginx.conf.template
+
+# On Railway shared CPU, `worker_processes auto` reads the HOST's core count
+# (often 32+). For a single-container CMS with a Unix socket bottleneck, 1 worker
+# is correct and uses less memory.
+worker_processes 1;
+
+error_log /proc/self/fd/2 warn;
+pid /var/run/nginx/nginx.pid;
+
+events {
+    worker_connections 1024;
+    multi_accept on;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+    keepalive_timeout 30;
+
+    # Suppress nginx version from Server header and error pages.
+    server_tokens off;
+
+    client_max_body_size 64M;
+
+    # ── Railway proxy: real client IP ─────────────────────────────────────────
+    # Railway's load balancer sets X-Forwarded-For. Without this, $remote_addr
+    # is always the internal LB IP — rate limiting and IP-based logging are useless.
+    set_real_ip_from 0.0.0.0/0;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    # ── Railway proxy: HTTPS detection ────────────────────────────────────────
+    # Railway terminates SSL at the load balancer and forwards HTTP to the container.
+    # Map the X-Forwarded-Proto header to a value php-fpm can use as the HTTPS flag.
+    # Without this: Laravel generates http:// URLs, session cookies lose Secure flag,
+    # Statamic CP serves mixed-content asset URLs.
+    map $http_x_forwarded_proto $https_flag {
+        https   on;
+        default "";
+    }
+
+    # fastcgi buffer: Statamic pages are 10–40 KB. Default 8 KB forces a second
+    # read syscall on almost every response. 16 KB avoids that overhead.
+    fastcgi_buffer_size 16k;
+    fastcgi_buffers 4 16k;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 4;
+    gzip_min_length 1024;
+    gzip_types
+        text/plain text/css text/javascript text/xml
+        application/javascript application/json application/xml
+        application/rss+xml image/svg+xml font/woff font/woff2;
+
+    access_log /proc/self/fd/1;
+
+    server {
+        listen ${PORT};
+        server_name _;
+        root /var/www/html/public;
+        index index.php index.html;
+        charset utf-8;
+
+        # ── Security headers ──────────────────────────────────────────────────
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+        # ── Block flat-file source files ──────────────────────────────────────
+        location ~* \.(md|yaml|yml)$ { deny all; return 404; }
+        location ~ /\.(?!well-known).* { deny all; }
+
+        # ── Health check: handled at nginx level, not php-fpm ─────────────────
+        # Returns 200 immediately without consuming a php-fpm worker slot.
+        # Railway polls this every 10–30 seconds; routing through Laravel would
+        # waste worker capacity.
+        location = /up {
+            access_log off;
+            add_header Content-Type application/json;
+            return 200 '{"status":"ok"}';
+        }
+
+        # ── Statamic image transform pipeline ─────────────────────────────────
+        # Statamic's Glide image manipulation API lives at /img/*. Requests here
+        # must route to PHP (which generates transformed images on-the-fly).
+        # Without this block, /img/ requests are treated as static files and 404.
+        location ^~ /img/ {
+            try_files $uri /index.php?$query_string;
+        }
+
+        # ── Static assets: serve directly, bypass php-fpm entirely ───────────
+        # Without this block, nginx passes every .css, .js, and image request to
+        # php-fpm which boots Laravel just to serve a file. This block eliminates
+        # 30–50% of unnecessary php-fpm load on a typical CMS.
+        location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|webp|woff|woff2|ttf|eot)$ {
+            try_files $uri =404;
+            access_log off;
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # ── Block PHP execution in the assets directory ───────────────────────
+        # Prevent uploaded PHP files from being executed. Without this, a user
+        # could upload evil.php and execute it by visiting /assets/evil.php.
+        location ^~ /assets/ {
+            try_files $uri =404;
+            location ~* \.php$ { deny all; return 404; }
+        }
+
+        location / {
+            try_files $uri $uri/ /index.php?$query_string;
+        }
+
+        location = /favicon.ico { access_log off; log_not_found off; }
+        location = /robots.txt  { access_log off; log_not_found off; }
+        error_page 404 /index.php;
+
+        location ~ \.php$ {
+            fastcgi_pass unix:/run/php-fpm.sock;
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+            # Tell PHP whether the original request was HTTPS (see map above).
+            # if_not_empty prevents passing an empty string when proto is not https.
+            fastcgi_param HTTPS $https_flag if_not_empty;
+            # 60s covers large asset uploads. 300s is excessive and keeps hung
+            # workers blocked for 5 minutes, starving the pool.
+            fastcgi_read_timeout 60;
+            include fastcgi_params;
+        }
+    }
+}

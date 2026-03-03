@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - statamic-data:/data      # mirrors Railway volume (persistent content)
+      # NOTE: Do NOT bind-mount . to /var/www/html — the entrypoint's rm -rf
+      # symlink setup would destroy your local content/ and storage/ directories.
+      # For live code editing in local dev, use `php artisan serve` directly instead.
+    environment:
+      PORT: 8080
+      APP_ENV: production        # Use production mode; local dev is via php artisan serve
+      APP_DEBUG: "true"
+      APP_KEY: base64:your-local-key-here-run-php-artisan-key-generate
+      APP_URL: http://localhost:8080
+      LOG_CHANNEL: stderr
+
+volumes:
+  statamic-data:
