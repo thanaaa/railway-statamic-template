@@ -1,4 +1,4 @@
-FROM php:8.3-fpm-alpine
+FROM php:8.4-fpm-alpine
 
 # ── System deps ───────────────────────────────────────────────────────────────
 # Install runtime libraries first, then build-time headers in a virtual group.
