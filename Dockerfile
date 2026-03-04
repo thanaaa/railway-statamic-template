@@ -1,4 +1,4 @@
-FROM php:8.3-fpm-alpine
+FROM php:8.4-fpm-alpine
 
 # ── System deps ───────────────────────────────────────────────────────────────
 # Install runtime libraries first, then build-time headers in a virtual group.
@@ -12,7 +12,7 @@ RUN apk add --no-cache \
         oniguruma-dev libxml2-dev autoconf g++ make \
     && docker-php-ext-configure gd --with-jpeg --with-webp \
     && docker-php-ext-install -j"$(nproc)" \
-       gd exif zip bcmath mbstring pdo tokenizer xml ctype opcache \
+       gd exif zip bcmath mbstring xml \
     && docker-php-ext-enable opcache \
     && apk del .build-deps \
     && rm -rf /var/cache/apk/* /tmp/*
